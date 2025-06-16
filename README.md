@@ -82,6 +82,74 @@ Execute o script de teste para verificar se todos os componentes estão funciona
 python test-integration.py
 ```
 
+## Validação dos Serviços Docker
+
+Utilize os comandos abaixo para validar o funcionamento dos serviços no ambiente Docker:
+
+### Verificar status dos contêineres
+
+```bash
+docker-compose ps
+```
+
+### Verificar logs dos serviços
+
+```bash
+# Logs do Java Processor
+docker-compose logs java-processor
+
+# Logs do Lambda Consumer
+docker-compose logs lambda-consumer
+
+# Logs do LocalStack (SQS/DynamoDB)
+docker-compose logs localstack
+
+# Logs do Prometheus
+docker-compose logs prometheus
+
+# Seguir logs em tempo real (adicione -f)
+docker-compose logs -f java-processor
+```
+
+### Verificar métricas e endpoints
+
+```bash
+# Verificar saúde do Java Processor
+curl http://localhost:8080/health
+
+# Verificar métricas expostas pelo Java Processor
+curl http://localhost:8080/actuator/prometheus
+
+# Verificar tabelas no DynamoDB local
+aws --endpoint-url=http://localhost:4566 dynamodb list-tables
+
+# Verificar mensagens na fila SQS
+aws --endpoint-url=http://localhost:4566 sqs get-queue-attributes --queue-url http://localhost:4566/000000000000/message-queue --attribute-names ApproximateNumberOfMessages
+```
+
+### Executar testes unitários do Java Processor
+
+```bash
+# Executar todos os testes no contêiner Docker
+docker-compose exec java-processor mvn test
+
+# Executar testes localmente (fora do Docker)
+cd docker/java-processor
+mvn test
+
+# Executar testes específicos por classe
+mvn test -Dtest=MessageProcessorServiceTest
+
+# Executar testes específicos por método
+mvn test -Dtest=MessageProcessorServiceTest#testProcessMessageWithRepositoryException
+
+# Executar testes com relatório detalhado
+mvn test -Dsurefire.useFile=false
+
+# Pular testes durante o build
+mvn package -DskipTests
+```
+
 ## Componentes
 
 ### Message Producer
