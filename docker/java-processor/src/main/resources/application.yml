@@ -1,0 +1,39 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: java-processor
+
+# Configuração do AWS SDK
+aws:
+  region: ${AWS_REGION:us-east-1}
+  endpoint: ${AWS_ENDPOINT_URL:http://localstack:4566}
+  dynamodb:
+    table-name: ${DYNAMODB_TABLE:message-processor-data}
+
+# Configurações de métricas e monitoramento
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+  endpoint:
+    health:
+      show-details: always
+    metrics:
+      enabled: true
+    prometheus:
+      enabled: true
+
+# Configurações de logging
+logging:
+  level:
+    root: INFO
+    com.example.processor: DEBUG
+    org.springframework.web: INFO

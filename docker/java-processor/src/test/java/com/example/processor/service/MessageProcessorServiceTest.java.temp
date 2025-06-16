@@ -1,0 +1,245 @@
+package com.example.processor.service;
+
+import com.example.processor.model.MessageData;
+import com.example.processor.model.ProcessRequest;
+import com.example.processor.model.ProcessResponse;
+import com.example.processor.repository.MessageRepository;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.Spy;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.time.Instant;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+public class MessageProcessorServiceTest {
+
+    @Mock
+    private MessageRepository messageRepository;
+    
+    @Mock
+    private Counter sqsMessageReceivedCounter;
+    
+    @Mock
+    private Counter sqsMessageErrorCounter;
+    
+    @Spy
+    private MeterRegistry meterRegistry = new SimpleMeterRegistry();
+    
+    private MessageProcessorService messageProcessorService;
+
+    private ProcessRequest insertRequest;
+    private ProcessRequest deleteRequest;
+    private String messageId;
+    private String timestamp;
+
+    @BeforeEach
+    void setUp() {
+        // Criar o serviço com as métricas mockadas
+        messageProcessorService = new MessageProcessorService(
+            messageRepository,
+            sqsMessageReceivedCounter,
+            sqsMessageErrorCounter,
+            meterRegistry
+        );
+        
+        // Preparar dados de teste
+        messageId = UUID.randomUUID().toString();
+        timestamp = Instant.now().toString();
+
+        // Criar request de INSERT
+        insertRequest = new ProcessRequest();
+        insertRequest.setId(messageId);
+        insertRequest.setTimestamp(timestamp);
+        insertRequest.setOperation("INSERT");
+        insertRequest.setName("Test User");
+        insertRequest.setEmail("test@example.com");
+        insertRequest.setAddress("123 Test St");
+        insertRequest.setPhone("+1234567890");
+
+        // Criar request de DELETE
+        deleteRequest = new ProcessRequest();
+        deleteRequest.setId(messageId);
+        deleteRequest.setTimestamp(timestamp);
+        deleteRequest.setOperation("DELETE");
+    }
+
+    @Test
+    void processInsertMessageSynchronously() {
+        // Arrange
+        when(messageRepository.save(any(MessageData.class))).thenReturn(new MessageData());
+
+        // Act
+        ProcessResponse response = messageProcessorService.processMessage(insertRequest);
+
+        // Assert
+        assertNotNull(response);
+        assertEquals("SUCCESS", response.getStatus());
+        assertTrue(response.getMessage().contains("Data inserted successfully"));
+        verify(messageRepository, times(1)).save(any(MessageData.class));
+        verify(sqsMessageReceivedCounter, times(1)).increment();
+        verify(sqsMessageErrorCounter, never()).increment();
+    }
+
+    @Test
+    void processDeleteMessageSynchronously() {
+        // Arrange
+        MessageData existingData = new MessageData();
+        existingData.setCustomerId(messageId);
+        existingData.setRecordId(timestamp);
+        
+        when(messageRepository.findById(messageId, timestamp)).thenReturn(existingData);
+        doNothing().when(messageRepository).delete(messageId, timestamp);
+
+        // Act
+        ProcessResponse response = messageProcessorService.processMessage(deleteRequest);
+
+        // Assert
+        assertNotNull(response);
+        assertEquals("SUCCESS", response.getStatus());
+        assertTrue(response.getMessage().contains("deleted successfully"));
+        verify(messageRepository, times(1)).findById(messageId, timestamp);
+        verify(messageRepository, times(1)).delete(messageId, timestamp);
+        verify(sqsMessageReceivedCounter, times(1)).increment();
+        verify(sqsMessageErrorCounter, never()).increment();
+    }
+
+    @Test
+    void processDeleteMessageNotFoundSynchronously() {
+        // Arrange
+        when(messageRepository.findById(messageId, timestamp)).thenReturn(null);
+
+        // Act
+        ProcessResponse response = messageProcessorService.processMessage(deleteRequest);
+
+        // Assert
+        assertNotNull(response);
+        assertEquals("WARNING", response.getStatus());
+        assertTrue(response.getMessage().contains("Item not found for deletion"));
+        verify(messageRepository, times(1)).findById(messageId, timestamp);
+        verify(messageRepository, never()).delete(messageId, timestamp);
+        verify(sqsMessageReceivedCounter, times(1)).increment();
+        verify(sqsMessageErrorCounter, never()).increment();
+    }
+
+    @Test
+    void processInsertMessageAsynchronously() {
+        // Arrange
+        when(messageRepository.save(any(MessageData.class))).thenReturn(new MessageData());
+
+        // Act
+        CompletableFuture<ProcessResponse> futureResponse = messageProcessorService.processMessageAsync(insertRequest);
+        ProcessResponse response = futureResponse.join(); // Aguarda a conclusão do CompletableFuture
+
+        // Assert
+        assertNotNull(response);
+        assertEquals("SUCCESS", response.getStatus());
+        assertTrue(response.getMessage().contains("Data inserted successfully"));
+        verify(messageRepository, times(1)).save(any(MessageData.class));
+        verify(sqsMessageReceivedCounter, times(1)).increment();
+        verify(sqsMessageErrorCounter, never()).increment();
+    }
+
+    @Test
+    void processInvalidOperationSynchronously() {
+        // Arrange
+        ProcessRequest invalidRequest = new ProcessRequest();
+        invalidRequest.setId(messageId);
+        invalidRequest.setTimestamp(timestamp);
+        invalidRequest.setOperation("INVALID");
+
+        // Act
+        ProcessResponse response = messageProcessorService.processMessage(invalidRequest);
+
+        // Assert
+        assertNotNull(response);
+        assertEquals("ERROR", response.getStatus());
+        assertTrue(response.getMessage().contains("Unknown operation"));
+        verify(messageRepository, never()).save(any(MessageData.class));
+        verify(messageRepository, never()).delete(anyString(), anyString());
+        verify(sqsMessageReceivedCounter, times(1)).increment();
+        verify(sqsMessageErrorCounter, times(1)).increment();
+    }
+    
+    @Test
+    void testProcessMessageTimerIsRecorded() {
+        // Arrange
+        when(messageRepository.save(any(MessageData.class))).thenReturn(new MessageData());
+        
+        // Act
+        ProcessResponse response = messageProcessorService.processMessage(insertRequest);
+        
+        // Assert
+        assertNotNull(response);
+        assertEquals("SUCCESS", response.getStatus());
+        
+        // Verificar se o timer foi registrado no MeterRegistry
+        assertTrue(meterRegistry.find("process_message_seconds").timer() != null);
+    }
+    
+    @Test
+    void testProcessMessageWithRepositoryException() {
+        // Arrange
+        when(messageRepository.save(any(MessageData.class)))
+            .thenThrow(new RuntimeException("Database connection error"));
+        
+        // Act
+        ProcessResponse response = messageProcessorService.processMessage(insertRequest);
+        
+        // Assert
+        assertNotNull(response);
+        assertEquals("ERROR", response.getStatus());
+        assertTrue(response.getMessage().contains("Error:"));
+        verify(sqsMessageReceivedCounter, times(1)).increment();
+        verify(sqsMessageErrorCounter, times(1)).increment();
+        
+        // Verificar se o timer foi registrado no MeterRegistry
+        assertTrue(meterRegistry.find("process_message_seconds").timer() != null);
+    }
+    
+    @Test
+    void testProcessMessageAsyncWithRepositoryException() throws Exception {
+        // Arrange
+        when(messageRepository.save(any(MessageData.class)))
+            .thenThrow(new RuntimeException("Database connection error"));
+        
+        // Act
+        CompletableFuture<ProcessResponse> futureResponse = messageProcessorService.processMessageAsync(insertRequest);
+        ProcessResponse response = futureResponse.get(); // Aguarda a conclusão do CompletableFuture
+        
+        // Assert
+        assertNotNull(response);
+        assertEquals("ERROR", response.getStatus());
+        assertTrue(response.getMessage().contains("Error:"));
+        verify(sqsMessageReceivedCounter, times(1)).increment();
+        verify(sqsMessageErrorCounter, times(1)).increment();
+    }
+    
+    @Test
+    void testProcessMessageAsyncTimerIsRecorded() throws Exception {
+        // Arrange
+        when(messageRepository.save(any(MessageData.class))).thenReturn(new MessageData());
+        
+        // Act
+        CompletableFuture<ProcessResponse> futureResponse = messageProcessorService.processMessageAsync(insertRequest);
+        ProcessResponse response = futureResponse.get(); // Aguarda a conclusão do CompletableFuture
+        
+        // Assert
+        assertNotNull(response);
+        assertEquals("SUCCESS", response.getStatus());
+        
+        // Verificar se o timer foi registrado no MeterRegistry para processamento assíncrono
+        assertTrue(meterRegistry.find("process_message_seconds").timer() != null);
+    }
+}

@@ -1,0 +1,125 @@
+version: '3.8'
+
+services:
+  # LocalStack para simular serviços AWS
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sqs,lambda,dynamodb
+      - DEBUG=1
+      - DATA_DIR=/var/lib/localstack/data
+      - TMPDIR=/var/lib/localstack/tmp
+    volumes:
+      - localstack-data:/var/lib/localstack
+    networks:
+      - aws-local
+
+  # Serviço para configurar recursos na LocalStack
+  setup:
+    build:
+      context: ./docker/setup
+      dockerfile: Dockerfile
+    depends_on:
+      - localstack
+    environment:
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+    networks:
+      - aws-local
+
+  # Produtor de mensagens para SQS
+  message-producer:
+    build:
+      context: ./docker/message-producer
+      dockerfile: Dockerfile
+    depends_on:
+      - setup
+    environment:
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - SQS_QUEUE_NAME=message-processor-main
+      - MESSAGE_BATCH_SIZE=10
+      - MESSAGE_INTERVAL_MS=1000
+    networks:
+      - aws-local
+
+  # Consumidor Lambda que processa mensagens em lote
+  lambda-consumer:
+    build:
+      context: ./docker/lambda-consumer
+      dockerfile: Dockerfile
+    depends_on:
+      - setup
+      - java-processor
+    environment:
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - SQS_QUEUE_NAME=message-processor-main
+      - SQS_DLQ_NAME=message-processor-dlq
+      - BATCH_SIZE=10
+      - ECS_SERVICE_URL=http://java-processor:8080/process
+    networks:
+      - aws-local
+
+  # Processador Java (simula ECS task)
+  java-processor:
+    build:
+      context: ./docker/java-processor
+      dockerfile: Dockerfile
+    depends_on:
+      - setup
+    ports:
+      - "8080:8080"
+    environment:
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - DYNAMODB_TABLE=message-processor-data
+    networks:
+      - aws-local
+
+  # Prometheus para métricas
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    networks:
+      - aws-local
+
+  # Grafana para visualização de métricas
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./docker/monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - aws-local
+
+networks:
+  aws-local:
+    driver: bridge
+
+volumes:
+  grafana-data:
+  prometheus-data:
+  localstack-data:
